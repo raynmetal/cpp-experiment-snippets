@@ -75,7 +75,7 @@ public:
         return *this;
     }
 
-    void connect(const std::string& theirSignal, const std::string& ourObserver, const std::shared_ptr<SignalTracker>& other);
+    void connect(const std::string& theirSignal, const std::string& ourObserver, SignalTracker& other);
 
 private:
     template <typename ...TArgs>
@@ -207,14 +207,6 @@ public:
     P(const P& other): P{} {}
     P& operator=(const P& other) {/* nothing to copy */ return *this;}
 
-    void makeConnection(std::shared_ptr<B> ptrB) {
-        connect(
-            "somethingDone", // to signal
-            "somethingDone", // with observer
-            std::static_pointer_cast<SignalTracker>(ptrB) // on this object
-        );
-    }
-
     SignalObserver<int> somethingDoneObserver {
         *this,
         "somethingDone",
@@ -261,7 +253,7 @@ int main() {
     // one listener, and so one additional line printed (total 2)
     {
         std::shared_ptr<P> ptrP { std::make_shared<P>() };
-        ptrP->makeConnection(ptrB);
+        ptrP->connect("somethingDone", "somethingDone", *ptrB);
         ptrB->doSomething(1);
     }
     std::cout  << "\n";
@@ -277,7 +269,7 @@ int main() {
         std::vector<std::shared_ptr<P>> multiplePs {};
         for(int i{0}; i < 5; ++i) {
             multiplePs.push_back(std::make_shared<P>());
-            multiplePs.back()->makeConnection(ptrB);
+            multiplePs.back()->connect("somethingDone", "somethingDone", *ptrB);
         }
         ptrB->doSomething(3);
     }
@@ -292,7 +284,7 @@ int main() {
         std::shared_ptr<P> singleP {std::make_shared<P>()};
         for(int i{0}; i < 5; ++i) {
             multipleBs.push_back(std::make_shared<B>());
-            singleP->makeConnection(multipleBs.back());
+            singleP->connect("somethingDone", "somethingDone", *multipleBs.back());
         }
 
         for(auto& b: multipleBs) {
@@ -305,7 +297,7 @@ int main() {
     {
         std::shared_ptr<P> singleP { std::make_shared<P>() };
 
-        singleP->makeConnection(ptrB);
+        singleP->connect("somethingDone", "somethingDone", *ptrB);
 
         // the signal from ptrB is not actually copied over to
         // copyB. Instead, copyB makes its own version of the 
@@ -323,7 +315,7 @@ int main() {
     // 6) 2 Observers with one constructed by copy after connection, 1 subject (total 2 lines)
     {
         std::shared_ptr<P> firstP { std::make_shared<P>() };
-        firstP->makeConnection(ptrB);
+        firstP->connect("somethingDone", "somethingDone", *ptrB);
         std::shared_ptr<P> secondP { std::make_shared<P>(*firstP) };
 
         // secondP didn't copy connection to ptrB, so only 2 lines 
@@ -332,7 +324,7 @@ int main() {
     std::cout << "\n";
 
     // 7) Single observer, single subject, this time connecting them through interface
-    // provided by their Signal/SignalObserver members (total 2 lines)
+    // provided by their SignalObserver member (total 2 lines)
     {
         std::shared_ptr<P> singleP { std::make_shared<P>() };
         singleP->somethingDoneObserver.connect(ptrB->sigDidSomething);
@@ -438,10 +430,8 @@ inline void SignalTracker::garbageCollection() {
     }
 }
 
-void SignalTracker::connect(const std::string& theirSignalsName, const std::string& ourObserversName, const std::shared_ptr<SignalTracker>& other) {
-    assert(other && "Cannot connect to an empty signal holding object");
-
-    auto otherSignal { other->mSignals.at(theirSignalsName).lock() };
+void SignalTracker::connect(const std::string& theirSignalsName, const std::string& ourObserversName, SignalTracker& other) {
+    auto otherSignal { other.mSignals.at(theirSignalsName).lock() };
     assert(otherSignal && "No signal of this name found on other");
 
     auto ourObserver { mObservers.at(ourObserversName).lock() };

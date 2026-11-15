@@ -5,6 +5,8 @@
 #include <functional>
 #include <thread>
 #include <mutex>
+#include <shared_mutex>
+#include <syncstream>
 #include <condition_variable>
 #include <cassert>
 
@@ -31,6 +33,7 @@ private:
 
 class Resources {
 public:
+    std::array<std::size_t, kNResources> getNWrites() const { return mResources; }
 
     void write(std::size_t resourceId) {
         assert(resourceId < kNResources && "Non-existent resource referenced");
@@ -42,8 +45,14 @@ public:
         return mResources[resourceId];
     };
 
+    void clear() {
+        for(auto& resource: mResources) {
+            resource = 0;
+        }
+    }
 private:
     std::array<std::size_t, kNResources> mResources {};
+
 };
 
 // Reference: https://gdcvault.com/play/1012321/Task-based-Multithreading-How-to
@@ -164,8 +173,8 @@ private:
         Resources& mResources;
         std::array<std::vector<RWRecord>, kNResources> mExpected;
         std::array<RWRecord, kNResources> mRecords {};
-        std::mutex mMutex {};
-        std::condition_variable mConditionVariable {};
+        std::shared_mutex mMutex {};
+        std::condition_variable_any mConditionVariable {};
     };
 
     void executeTask(Task& task, SyncedResources& resources);
@@ -176,46 +185,78 @@ int main() {
     pool.start();
 
     Resources resources {};
+
+    const auto nJobs { 10000 };
+    std::vector<std::pair<std::function<void(TaskSystem::Task&)>, std::function<void()>>> jobs {};
+
+    for(auto i { 0 }; i < nJobs; ++i) {
+        std::array<std::pair<bool, bool>, kNResources> readOrWrite {};
+        for(auto& decision: readOrWrite) {
+            decision.first = (std::rand() % 100) > 67;
+            decision.second = (std::rand() % 100) > 95;
+        }
+        jobs.push_back({
+            [=](TaskSystem::Task& task) {
+                for(auto j { 0 }; j < kNResources; ++j) {
+                    if(!readOrWrite[j].first) {
+                        continue;
+                    }
+
+                    if(readOrWrite[j].second) {
+                        task.addWrite(j);
+                    } else {
+                        task.addRead(j);
+                    }
+                }
+            },
+            [=, &resources](){
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                for(auto j { 0 }; j < kNResources; ++j) {
+                    if(!readOrWrite[j].first) {
+                        continue;
+                    }
+
+                    if(readOrWrite[j].second) {
+                        resources.write(j);
+                    } else {
+                        resources.read(j);
+                    }
+                }
+            }
+        });
+    }
+
+    const auto singleThreadedStart { std::chrono::system_clock::now() };
+    for(auto& job: jobs) {
+        job.second();
+    }
+    const auto singleThreadedEnd { std::chrono::system_clock::now() };
+    const auto singleThreadedTime { singleThreadedEnd - singleThreadedStart };
+    std::cout << "Single threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(singleThreadedTime).count() << "ms\n";
+    std::cout << "Single threaded write counts: ";
+    for(auto& nWrites: resources.getNWrites()) {
+        std::cout << nWrites << ", ";
+    }
+    std::cout << "\n";
+
+    resources.clear();
     TaskSystem taskSystem {};
     TaskSystem::Graph graph {};
-    graph.addTask(
-        [&](TaskSystem::Task& task) {
-            task.addWrite(0);
-        },
-        [=]() {
-            std::cout << "executing A.\n";
-        }
-    );
-    graph.addTask(
-        [&](TaskSystem::Task& task) {
-            task.addRead(0);
-        },
-        [=]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            std::cout << "executing B.\n";
-        }
-    );
-    graph.addTask(
-        [&](TaskSystem::Task& task) {
-            task.addRead(0);
-        },
-        [=]() {
-            std::cout << "executing C.\n";
-        }
-    );
-    graph.addTask(
-        [&](TaskSystem::Task& task) {
-            task.addWrite(0);
-        },
-        [=]() {
-            std::cout << "executing D.\n";
-        }
-    );
+    const auto multiThreadedStart { std::chrono::system_clock::now() };
+    for(auto& job: jobs) {
+        graph.addTask(job.first, job.second);
+    }
     taskSystem.execute(std::move(graph), resources, pool);
-
-    // wait for all jobs to be completed, then stop
     while(pool.isBusy());
     pool.stop();
+    const auto multiThreadedEnd { std::chrono::system_clock::now() };
+    const auto multiThreadedTime { multiThreadedEnd - multiThreadedStart };
+    std::cout << "Multi threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(multiThreadedTime).count() << "ms\n";
+    std::cout << "Multi threaded write counts: ";
+    for(auto& nWrites: resources.getNWrites()) {
+        std::cout << nWrites << ", ";
+    }
+    std::cout << "\n";
 
     return 0;
 }
@@ -344,7 +385,8 @@ TaskSystem::SyncedResources::SyncedResources(Resources& resources, const std::ar
 }
 
 void TaskSystem::SyncedResources::awaitAccess(const Task& task) {
-    std::unique_lock<std::mutex> lock { mMutex };
+    std::shared_lock<std::shared_mutex> lock { mMutex };
+    assert(lock.owns_lock() && "Failed to acquire shared lock");
     mConditionVariable.wait(lock, [&, this]() {
         for(auto& resource: task.mAccessedResources) {
             const bool willWrite { resource.second };
@@ -367,7 +409,8 @@ void TaskSystem::SyncedResources::awaitAccess(const Task& task) {
 
 void TaskSystem::SyncedResources::signalExit(const Task& task) {
     {
-        std::unique_lock<std::mutex> lock { mMutex };
+        std::unique_lock<std::shared_mutex> lock { mMutex };
+        assert(lock.owns_lock() && "Failed to acquire unique lock");
         for(auto& resource: task.mAccessedResources) {
             const std::size_t resourceId { resource.first.getResourceId() };
             const bool didWrite { resource.second };
@@ -379,7 +422,6 @@ void TaskSystem::SyncedResources::signalExit(const Task& task) {
             }
         }
     }
-
     mConditionVariable.notify_all();
 }
 

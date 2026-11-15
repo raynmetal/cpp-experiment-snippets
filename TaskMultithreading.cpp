@@ -555,6 +555,16 @@ private:
  *
  */
 int main() {
+
+    std::cout << "No. of jobs: " << kNJobs << "\n";
+    std::cout << "No. of resources: " << kNResources << "\n";
+    std::cout << "Minimum job time: " << kJobTimeMillis << "ms\n";
+    std::cout << "Job-resource read chance: " << static_cast<int>(kReadChance) << "\%\n";
+    std::cout << "Job-resource write chance: " << static_cast<int>(kReadChance) << "\% x " 
+        << static_cast<int>(kWriteChance) << "\% = " 
+        << kReadChance * kWriteChance / 100 << "\%\n";
+    std::cout << "No. of threads: " << std::thread::hardware_concurrency() << "\n";
+
     ThreadPool pool {};
 
     Resources resources {};
@@ -604,8 +614,8 @@ int main() {
     const auto singleThreadedEnd { std::chrono::system_clock::now() };
     const auto singleThreadedTime { singleThreadedEnd - singleThreadedStart };
 
-    std::cout << "Single threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(singleThreadedTime).count() << "ms\n";
-    std::cout << "Single threaded write counts: ";
+    std::cout << "Single-threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(singleThreadedTime).count() << "ms\n";
+    std::cout << "Single-threaded write counts: ";
     for(auto& nWrites: resources.getNWrites()) {
         std::cout << nWrites << ", ";
     }
@@ -623,12 +633,17 @@ int main() {
     const auto multiThreadedEnd { std::chrono::system_clock::now() };
     const auto multiThreadedTime { multiThreadedEnd - multiThreadedStart };
 
-    std::cout << "Multi threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(multiThreadedTime).count() << "ms\n";
-    std::cout << "Multi threaded write counts: ";
+    std::cout << "Multi-threaded time: " << std::chrono::duration_cast<std::chrono::milliseconds>(multiThreadedTime).count() << "ms\n";
+    std::cout << "Multi-threaded write counts: ";
     for(auto& nWrites: resources.getNWrites()) {
         std::cout << nWrites << ", ";
     }
     std::cout << "\n";
+
+    std::cout << "Multi-threaded speedup: " <<
+        100 * std::chrono::duration_cast<std::chrono::milliseconds>(singleThreadedTime).count()
+        / std::chrono::duration_cast<std::chrono::milliseconds>(multiThreadedTime).count()
+        << "\%\n";
 
     return 0;
 }

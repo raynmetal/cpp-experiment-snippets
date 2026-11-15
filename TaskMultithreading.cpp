@@ -10,7 +10,7 @@
 #include <condition_variable>
 #include <cassert>
 
-const std::size_t kNResources { 8 };
+const std::size_t kNResources { 20 };
 
 // Taken from PhD AP EcE's answer on stackoverflow:
 // - https://stackoverflow.com/a/32593825/5677302
@@ -173,8 +173,8 @@ private:
         Resources& mResources;
         std::array<std::vector<RWRecord>, kNResources> mExpected;
         std::array<RWRecord, kNResources> mRecords {};
-        std::shared_mutex mMutex {};
-        std::condition_variable_any mConditionVariable {};
+        std::array<std::shared_mutex, kNResources> mMutexes {};
+        std::array<std::condition_variable_any, kNResources> mConditionVariables {};
     };
 
     void executeTask(Task& task, SyncedResources& resources);
@@ -385,35 +385,36 @@ TaskSystem::SyncedResources::SyncedResources(Resources& resources, const std::ar
 }
 
 void TaskSystem::SyncedResources::awaitAccess(const Task& task) {
-    std::shared_lock<std::shared_mutex> lock { mMutex };
-    assert(lock.owns_lock() && "Failed to acquire shared lock");
-    mConditionVariable.wait(lock, [&, this]() {
-        for(auto& resource: task.mAccessedResources) {
-            const bool willWrite { resource.second };
-            const std::size_t resourceId { resource.first.getResourceId() };
-            const RWRecord recordCurrent { this->mRecords[resourceId] };
-            if(ResourceName { recordCurrent } != resource.first) {
-                return false;
-            }
+    for(auto& resource: task.mAccessedResources) {
+        const bool willWrite { resource.second };
+        const std::size_t resourceId { resource.first.getResourceId() };
 
-            const auto nExpectedReads {
-                this->mExpected[resourceId][resource.first.getNWrites()].getNReads()
-            };
-            if(willWrite && recordCurrent.mNReads != nExpectedReads) {
-                return false;
-            }
-        }
-        return true;
-    });
+        std::shared_lock<std::shared_mutex> lock { mMutexes[resourceId] };
+        assert(lock.owns_lock() && "Failed to acquire shared lock");
+        mConditionVariables[resourceId].wait(lock, [&, this]() {
+                const RWRecord recordCurrent { mRecords[resourceId] };
+                if(ResourceName { recordCurrent } != resource.first) {
+                    return false;
+                }
+
+                const auto nExpectedReads {
+                    this->mExpected[resourceId][resource.first.getNWrites()].getNReads()
+                };
+                if(willWrite && recordCurrent.mNReads != nExpectedReads) {
+                    return false;
+                }
+            return true;
+        });
+    }
 }
 
 void TaskSystem::SyncedResources::signalExit(const Task& task) {
-    {
-        std::unique_lock<std::shared_mutex> lock { mMutex };
-        assert(lock.owns_lock() && "Failed to acquire unique lock");
-        for(auto& resource: task.mAccessedResources) {
-            const std::size_t resourceId { resource.first.getResourceId() };
-            const bool didWrite { resource.second };
+    for(auto& resource: task.mAccessedResources) {
+        const std::size_t resourceId { resource.first.getResourceId() };
+        const bool didWrite { resource.second };
+        {
+            std::unique_lock<std::shared_mutex> lock { mMutexes[resourceId] };
+            assert(lock.owns_lock() && "Failed to acquire unique lock");
             if(!didWrite) {
                 ++mRecords[resourceId].mNReads;
             } else {
@@ -421,8 +422,8 @@ void TaskSystem::SyncedResources::signalExit(const Task& task) {
                 mRecords[resourceId].mNReads = 0;
             }
         }
+        mConditionVariables[resourceId].notify_all();
     }
-    mConditionVariable.notify_all();
 }
 
 void TaskSystem::executeTask(TaskSystem::Task& task, SyncedResources& resources) {
